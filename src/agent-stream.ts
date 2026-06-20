@@ -5,13 +5,14 @@
  * REPLACES the content each time. This renderer rebuilds the full message
  * from scratch on every flush: header + sealed blocks + current block.
  *
- * Overrides onSystemText/onAgentReady/onSessionReady to accumulate in header
+ * Overrides host notifications to accumulate in header
  * (instead of sending separate messages via sendText).
  */
 
 import {
   BlockRenderer,
   type BlockKind,
+  type ChannelSessionInfo,
   type VerboseConfig,
 } from "@vibearound/plugin-channel-sdk";
 import type { WeComBot } from "./bot.js";
@@ -100,11 +101,33 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     this.flushToWeCom(chatId, false).catch(() => {});
   }
 
+  onSessionInfo(chatId: string, info: ChannelSessionInfo): void {
+    const agentVersion = info.agent.version ? ` v${info.agent.version}` : "";
+    const profile = info.agent.profileId ?? "default";
+    const sessionLine =
+      info.start === "new"
+        ? `📋 New session: ${info.sessionId}`
+        : `📋 Continuing session: ${info.sessionId}`;
+    this.appendHeader(
+      chatId,
+      [
+        "ℹ️ VibeAround session",
+        `Workspace: ${info.workspacePath}`,
+        `Agent: ${info.agent.name}${agentVersion}`,
+        `Profile: ${profile}`,
+        sessionLine,
+      ].join("\n"),
+    );
+    this.flushToWeCom(chatId, false).catch(() => {});
+  }
+
+  /** @deprecated `va/session_info` carries the visible startup card. */
   onAgentReady(chatId: string, agent: string, version: string): void {
     this.appendHeader(chatId, `🤖 Agent: ${agent} v${version}`);
     this.flushToWeCom(chatId, false).catch(() => {});
   }
 
+  /** @deprecated `va/session_info` carries the visible startup card. */
   onSessionReady(chatId: string, sessionId: string): void {
     this.appendHeader(chatId, `📋 Session: ${sessionId}`);
     this.flushToWeCom(chatId, false).catch(() => {});
