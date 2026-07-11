@@ -94,6 +94,10 @@ export class WeComBot {
     this.streamHandler = handler;
   }
 
+  public isConnected(): boolean {
+    return this.client.isConnected;
+  }
+
   /**
    * Resolve a stable chatId for the WeCom message.
    * - Group chats: chatid

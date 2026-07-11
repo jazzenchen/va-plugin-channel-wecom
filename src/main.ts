@@ -29,4 +29,5 @@ runChannelPlugin({
     ),
   createRenderer: (bot, log, verbose) =>
     new AgentStreamHandler(bot, log, verbose),
+  healthCheck: async (bot) => bot.isConnected(),
 });
