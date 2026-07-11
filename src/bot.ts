@@ -19,8 +19,13 @@ import {
   type TextMessage,
   type WsFrame,
 } from "@wecom/aibot-node-sdk";
-import type { Agent, ContentBlock } from "@vibearound/plugin-channel-sdk";
-import { extractErrorMessage } from "@vibearound/plugin-channel-sdk";
+import type { Agent, ChannelInboundContext, ContentBlock } from "@vibearound/plugin-channel-sdk";
+import {
+  cancelChannelPrompt,
+  extractErrorMessage,
+  isChannelStopCommand,
+  sendChannelPrompt,
+} from "@vibearound/plugin-channel-sdk";
 import type { AgentStreamHandler } from "./agent-stream.js";
 
 interface DownloadedImage {
@@ -57,14 +62,25 @@ export class WeComBot {
   private agent: Agent;
   private log: LogFn;
   private cacheDir: string;
+  private channelInstanceId: string;
+  private actorId: string;
   private streamHandler: AgentStreamHandler | null = null;
   /** Map chatId → latest pending frame, used for replying */
   private pending = new Map<string, PendingFrame>();
 
-  constructor(config: WeComConfig, agent: Agent, log: LogFn, cacheDir: string) {
+  constructor(
+    config: WeComConfig,
+    agent: Agent,
+    log: LogFn,
+    cacheDir: string,
+    channelInstanceId: string,
+    actorId: string,
+  ) {
     this.agent = agent;
     this.log = log;
     this.cacheDir = cacheDir;
+    this.channelInstanceId = channelInstanceId;
+    this.actorId = actorId;
 
     this.client = new WSClient({
       botId: config.bot_id,
@@ -202,6 +218,23 @@ export class WeComBot {
       return;
     }
 
+    const isGroup = msg.chattype === "group";
+    const inboundContext = {
+      channelInstanceId: this.channelInstanceId,
+      actorId: this.actorId,
+      chatId,
+      senderId,
+      platformMessageId: msg.msgid,
+      scope: isGroup ? "group" : "dm",
+      // WeCom AI Bot only emits group messages that explicitly address it.
+      addressedBy: isGroup ? "mention" : "dm",
+    } satisfies ChannelInboundContext;
+    const inboundText = texts.join("\n");
+    if (inboundText && isChannelStopCommand(inboundText)) {
+      await cancelChannelPrompt(this.agent, { context: inboundContext });
+      return;
+    }
+
     // Generate a stream id for this turn (stable across all replyStream calls).
     // Pin the pending frame so agent-stream's replyStream calls find it.
     const streamId = `${msg.msgid}-stream`;
@@ -268,10 +301,11 @@ export class WeComBot {
     this.streamHandler?.onPromptSent(chatId);
 
     try {
-      const response = await this.agent.prompt({
-        sessionId: chatId,
+      const response = await sendChannelPrompt(this.agent, {
+        context: inboundContext,
         prompt: contentBlocks,
       });
+      if (!response) return;
       this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
       this.streamHandler?.onTurnEnd(chatId);
     } catch (error: unknown) {
