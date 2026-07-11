@@ -44,8 +44,9 @@ export class AgentStreamHandler extends BlockRenderer<string> {
   }
 
   protected async sendText(target: ChannelTarget, text: string): Promise<void> {
-    // For standalone system text outside a turn, send directly
-    await this.wecomBot.replyMarkdown(target, text, true);
+    // Text notifications and permission prompts can arrive mid-turn. Only
+    // onAfterTurnEnd/onAfterTurnError may finish the pinned reply stream.
+    await this.wecomBot.replyMarkdown(target, text, false);
   }
 
   protected formatContent(kind: BlockKind, content: string, _sealed: boolean): string {
