@@ -241,81 +241,83 @@ export class WeComBot {
     const streamId = `${msg.msgid}-stream`;
     this.pending.set(msg.msgid, { frame, streamId });
 
-    const preview = texts.join(" ").slice(0, 80);
-    this.log(
-      "debug",
-      `message chat=${chatId} sender=${senderId} msgtype=${msg.msgtype} texts=${texts.length} images=${images.length} preview=${preview}`,
-    );
+    try {
+      const preview = texts.join(" ").slice(0, 80);
+      this.log(
+        "debug",
+        `message chat=${chatId} sender=${senderId} msgtype=${msg.msgtype} texts=${texts.length} images=${images.length} preview=${preview}`,
+      );
 
     // Download every attached image into the cache directory. Skip any
     // that fail — the agent can still handle whatever successfully
     // downloaded plus the text.
-    const downloaded: DownloadedImage[] = [];
-    for (const image of images) {
-      const local = await this.downloadImage(chatId, msg.msgid, image).catch(
-        (err: unknown) => {
-          this.log(
-            "warn",
-            `failed to download image url=${image.url}: ${extractErrorMessage(err)}`,
-          );
-          return null;
-        },
-      );
-      if (local) downloaded.push(local);
-    }
+      const downloaded: DownloadedImage[] = [];
+      for (const image of images) {
+        const local = await this.downloadImage(chatId, msg.msgid, image).catch(
+          (err: unknown) => {
+            this.log(
+              "warn",
+              `failed to download image url=${image.url}: ${extractErrorMessage(err)}`,
+            );
+            return null;
+          },
+        );
+        if (local) downloaded.push(local);
+      }
 
     // Build content blocks. Text first (if any), then a synthesized
     // description when the message is image-only, then resource_link
     // blocks for each downloaded image. Using file:// URIs lets the
     // ACPPod relocate step hand them off to the Claude workspace the
     // same way it does for feishu/discord.
-    const contentBlocks: ContentBlock[] = [];
-    if (texts.length > 0) {
-      contentBlocks.push({ type: "text", text: texts.join("\n") });
-    } else if (downloaded.length > 0) {
-      contentBlocks.push({
-        type: "text",
-        text: `The user sent ${downloaded.length} image${downloaded.length > 1 ? "s" : ""}.`,
-      });
-    }
-    for (const image of downloaded) {
-      contentBlocks.push({
-        type: "resource_link",
-        uri: `file://${image.path}`,
-        name: image.fileName,
-        mimeType: image.mimeType,
-      });
-    }
+      const contentBlocks: ContentBlock[] = [];
+      if (texts.length > 0) {
+        contentBlocks.push({ type: "text", text: texts.join("\n") });
+      } else if (downloaded.length > 0) {
+        contentBlocks.push({
+          type: "text",
+          text: `The user sent ${downloaded.length} image${downloaded.length > 1 ? "s" : ""}.`,
+        });
+      }
+      for (const image of downloaded) {
+        contentBlocks.push({
+          type: "resource_link",
+          uri: `file://${image.path}`,
+          name: image.fileName,
+          mimeType: image.mimeType,
+        });
+      }
 
-    if (contentBlocks.length === 0) {
-      this.log("warn", `no content blocks produced for chat=${chatId}, dropping`);
-      if (target.replyTo) this.pending.delete(target.replyTo);
-      return;
-    }
-
-    const firstText = contentBlocks[0]?.type === "text" ? contentBlocks[0].text : "";
-    if (firstText && this.streamHandler?.consumePendingText(target, firstText)) {
-      if (target.replyTo) this.pending.delete(target.replyTo);
-      return;
-    }
-
-    this.streamHandler?.onPromptSent(target);
-
-    try {
-      const response = await sendChannelPrompt(this.agent, {
-        context: inboundContext,
-        prompt: contentBlocks,
-      });
-      if (!response) {
-        await this.streamHandler?.onTurnEnd(target);
+      if (contentBlocks.length === 0) {
+        this.log("warn", `no content blocks produced for chat=${chatId}, dropping`);
         return;
       }
-      this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
-      await this.streamHandler?.onTurnEnd(target);
-    } catch (error: unknown) {
-      const errMsg = extractErrorMessage(error);
-      this.log("error", `prompt failed chat=${chatId}: ${errMsg}`);
-      await this.streamHandler?.onTurnError(target, errMsg);
+
+      const firstText = contentBlocks[0]?.type === "text" ? contentBlocks[0].text : "";
+      if (firstText && this.streamHandler?.consumePendingText(target, firstText)) {
+        return;
+      }
+
+      this.streamHandler?.onPromptSent(target);
+
+      try {
+        const response = await sendChannelPrompt(this.agent, {
+          context: inboundContext,
+          prompt: contentBlocks,
+        });
+        if (!response) {
+          await this.streamHandler?.onTurnEnd(target);
+          return;
+        }
+        this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
+        await this.streamHandler?.onTurnEnd(target);
+      } catch (error: unknown) {
+        const errMsg = extractErrorMessage(error);
+        this.log("error", `prompt failed chat=${chatId}: ${errMsg}`);
+        await this.streamHandler?.onTurnError(target, errMsg);
+      }
+    } finally {
+      if (target.replyTo) this.pending.delete(target.replyTo);
     }
   }
 
