@@ -19,9 +19,10 @@ import {
   type TextMessage,
   type WsFrame,
 } from "@wecom/aibot-node-sdk";
-import type { Agent, ChannelInboundContext, ContentBlock } from "@vibearound/plugin-channel-sdk";
+import type { Agent, ChannelInboundContext, ChannelTarget, ContentBlock } from "@vibearound/plugin-channel-sdk";
 import {
   cancelChannelPrompt,
+  channelTargetFromInboundContext,
   extractErrorMessage,
   isChannelStopCommand,
   sendChannelPrompt,
@@ -65,7 +66,7 @@ export class WeComBot {
   private channelInstanceId: string;
   private actorId: string;
   private streamHandler: AgentStreamHandler | null = null;
-  /** Map chatId → latest pending frame, used for replying */
+  /** Map inbound message id → its pinned reply frame. */
   private pending = new Map<string, PendingFrame>();
 
   constructor(
@@ -105,23 +106,18 @@ export class WeComBot {
     return `dm:${msg.from?.userid ?? "unknown"}`;
   }
 
-  /** Get the pending frame for a channel (used by stream handler to reply). */
-  getPendingFrame(chatId: string): PendingFrame | null {
-    return this.pending.get(chatId) ?? null;
-  }
-
   /** Reply to a WeCom message with streaming markdown content. */
-  async replyMarkdown(chatId: string, content: string, finish: boolean): Promise<void> {
-    const pending = this.pending.get(chatId);
+  async replyMarkdown(target: ChannelTarget, content: string, finish: boolean): Promise<void> {
+    const pending = target.replyTo ? this.pending.get(target.replyTo) : undefined;
     if (!pending) {
-      this.log("warn", `no pending frame for channel=${chatId}, dropping reply`);
+      this.log("warn", `no pending frame for target=${target.chatId}/${target.replyTo ?? "route"}, dropping reply`);
       return;
     }
     try {
       await this.client.replyStream(pending.frame, pending.streamId, content, finish);
       if (finish) {
         // Clear after final reply
-        this.pending.delete(chatId);
+        this.pending.delete(target.replyTo!);
       }
     } catch (e) {
       const err = e as { message?: string };
@@ -229,6 +225,7 @@ export class WeComBot {
       // WeCom AI Bot only emits group messages that explicitly address it.
       addressedBy: isGroup ? "mention" : "dm",
     } satisfies ChannelInboundContext;
+    const target = channelTargetFromInboundContext(inboundContext);
     const inboundText = texts.join("\n");
     if (inboundText && isChannelStopCommand(inboundText)) {
       await cancelChannelPrompt(this.agent, { context: inboundContext });
@@ -238,7 +235,7 @@ export class WeComBot {
     // Generate a stream id for this turn (stable across all replyStream calls).
     // Pin the pending frame so agent-stream's replyStream calls find it.
     const streamId = `${msg.msgid}-stream`;
-    this.pending.set(chatId, { frame, streamId });
+    this.pending.set(msg.msgid, { frame, streamId });
 
     const preview = texts.join(" ").slice(0, 80);
     this.log(
@@ -288,30 +285,33 @@ export class WeComBot {
 
     if (contentBlocks.length === 0) {
       this.log("warn", `no content blocks produced for chat=${chatId}, dropping`);
-      this.pending.delete(chatId);
+      if (target.replyTo) this.pending.delete(target.replyTo);
       return;
     }
 
     const firstText = contentBlocks[0]?.type === "text" ? contentBlocks[0].text : "";
-    if (firstText && this.streamHandler?.consumePendingText(chatId, firstText)) {
-      this.pending.delete(chatId);
+    if (firstText && this.streamHandler?.consumePendingText(target, firstText)) {
+      if (target.replyTo) this.pending.delete(target.replyTo);
       return;
     }
 
-    this.streamHandler?.onPromptSent(chatId);
+    this.streamHandler?.onPromptSent(target);
 
     try {
       const response = await sendChannelPrompt(this.agent, {
         context: inboundContext,
         prompt: contentBlocks,
       });
-      if (!response) return;
+      if (!response) {
+        await this.streamHandler?.onTurnEnd(target);
+        return;
+      }
       this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
-      this.streamHandler?.onTurnEnd(chatId);
+      await this.streamHandler?.onTurnEnd(target);
     } catch (error: unknown) {
       const errMsg = extractErrorMessage(error);
       this.log("error", `prompt failed chat=${chatId}: ${errMsg}`);
-      this.streamHandler?.onTurnError(chatId, errMsg);
+      await this.streamHandler?.onTurnError(target, errMsg);
     }
   }
 
