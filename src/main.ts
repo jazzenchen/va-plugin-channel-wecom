@@ -15,7 +15,7 @@ runChannelPlugin({
   name: "vibearound-wecom",
   version: "0.1.0",
   requiredConfig: ["bot_id", "secret"],
-  createBot: ({ config, agent, log, cacheDir }) =>
+  createBot: ({ config, agent, log, cacheDir, channelInstanceId, actorId }) =>
     new WeComBot(
       {
         bot_id: config.bot_id as string,
@@ -24,7 +24,10 @@ runChannelPlugin({
       agent,
       log,
       cacheDir,
+      channelInstanceId,
+      actorId,
     ),
   createRenderer: (bot, log, verbose) =>
     new AgentStreamHandler(bot, log, verbose),
+  healthCheck: async (bot) => bot.isConnected(),
 });
