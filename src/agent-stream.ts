@@ -5,14 +5,17 @@
  * REPLACES the content each time. This renderer rebuilds the full message
  * from scratch on every flush: header + sealed blocks + current block.
  *
- * Overrides onSystemText/onAgentReady/onSessionReady to accumulate in header
+ * Overrides host notifications to accumulate in header
  * (instead of sending separate messages via sendText).
  */
 
 import {
   BlockRenderer,
   type BlockKind,
+  type ChannelSessionInfo,
+  type ChannelTarget,
   type VerboseConfig,
+  channelTargetKey,
 } from "@vibearound/plugin-channel-sdk";
 import type { WeComBot } from "./bot.js";
 
@@ -40,9 +43,10 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     this.log = log;
   }
 
-  protected async sendText(chatId: string, text: string): Promise<void> {
-    // For standalone system text outside a turn, send directly
-    await this.wecomBot.replyMarkdown(chatId, text, true);
+  protected async sendText(target: ChannelTarget, text: string): Promise<void> {
+    // Text notifications and permission prompts can arrive mid-turn. Only
+    // onAfterTurnEnd/onAfterTurnError may finish the pinned reply stream.
+    await this.wecomBot.replyMarkdown(target, text, false);
   }
 
   protected formatContent(kind: BlockKind, content: string, _sealed: boolean): string {
@@ -53,75 +57,103 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     }
   }
 
-  protected async sendBlock(chatId: string, _kind: BlockKind, content: string): Promise<string | null> {
-    const prev = this.currentBlock.get(chatId);
+  protected async sendBlock(target: ChannelTarget, _kind: BlockKind, content: string): Promise<string | null> {
+    const key = channelTargetKey(target);
+    const prev = this.currentBlock.get(key);
     if (prev) {
-      const sealed = this.sealedBlocks.get(chatId) ?? [];
+      const sealed = this.sealedBlocks.get(key) ?? [];
       sealed.push(prev);
-      this.sealedBlocks.set(chatId, sealed);
+      this.sealedBlocks.set(key, sealed);
     }
-    this.currentBlock.set(chatId, content);
-    await this.flushToWeCom(chatId, false);
+    this.currentBlock.set(key, content);
+    await this.flushToWeCom(target, false);
     return "stream";
   }
 
   protected async editBlock(
-    chatId: string,
+    target: ChannelTarget,
     _ref: string,
     _kind: BlockKind,
     content: string,
     _sealed: boolean,
   ): Promise<void> {
-    this.currentBlock.set(chatId, content);
-    await this.flushToWeCom(chatId, false);
+    this.currentBlock.set(channelTargetKey(target), content);
+    await this.flushToWeCom(target, false);
   }
 
-  protected async onAfterTurnEnd(chatId: string): Promise<void> {
-    await this.flushToWeCom(chatId, true);
-    this.clearState(chatId);
-    this.log("debug", `turn_complete session=${chatId}`);
+  protected async onAfterTurnEnd(target: ChannelTarget): Promise<void> {
+    await this.flushToWeCom(target, true);
+    this.clearState(target);
+    this.log("debug", `turn_complete chat=${target.chatId}`);
   }
 
-  protected async onAfterTurnError(chatId: string, error: string): Promise<void> {
-    this.currentBlock.set(chatId, `❌ Error: ${error}`);
-    await this.flushToWeCom(chatId, true);
-    this.clearState(chatId);
+  protected async onAfterTurnError(target: ChannelTarget, error: string): Promise<void> {
+    this.currentBlock.set(channelTargetKey(target), `❌ Error: ${error}`);
+    await this.flushToWeCom(target, true);
+    this.clearState(target);
   }
 
   // Override prompt lifecycle to clear WeCom-specific state
-  onPromptSent(chatId: string): void {
-    this.clearState(chatId);
-    super.onPromptSent(chatId);
+  onPromptSent(target: ChannelTarget): void {
+    this.clearState(target);
+    super.onPromptSent(target);
   }
 
   // Override notification handlers — accumulate in header instead of sendText
-  onSystemText(chatId: string, text: string): void {
-    this.appendHeader(chatId, text);
-    this.flushToWeCom(chatId, false).catch(() => {});
+  onSystemText(target: ChannelTarget, text: string): void {
+    this.appendHeader(target, text);
+    this.flushToWeCom(target, false).catch(() => {});
   }
 
-  onAgentReady(chatId: string, agent: string, version: string): void {
-    this.appendHeader(chatId, `🤖 Agent: ${agent} v${version}`);
-    this.flushToWeCom(chatId, false).catch(() => {});
+  onSessionInfo(target: ChannelTarget, info: ChannelSessionInfo): void {
+    if (!target.replyTo) return;
+    const agentVersion = info.agent.version ? ` v${info.agent.version}` : "";
+    const profile = info.agent.profileId ?? "default";
+    const sessionLine =
+      info.start === "new"
+        ? `📋 New session: ${info.sessionId}`
+        : `📋 Continuing session: ${info.sessionId}`;
+    this.appendHeader(
+      target,
+      [
+        "ℹ️ VibeAround session",
+        `Workspace: ${info.workspacePath}`,
+        `Agent: ${info.agent.name}${agentVersion}`,
+        `Profile: ${profile}`,
+        sessionLine,
+      ].join("\n"),
+    );
+    this.flushToWeCom(target, false).catch(() => {});
   }
 
-  onSessionReady(chatId: string, sessionId: string): void {
-    this.appendHeader(chatId, `📋 Session: ${sessionId}`);
-    this.flushToWeCom(chatId, false).catch(() => {});
+  /** @deprecated `va/session_info` carries the visible startup card. */
+  onAgentReady(target: ChannelTarget, agent: string, version: string): void {
+    if (!target.replyTo) return;
+    this.appendHeader(target, `🤖 Agent: ${agent} v${version}`);
+    this.flushToWeCom(target, false).catch(() => {});
+  }
+
+  /** @deprecated `va/session_info` carries the visible startup card. */
+  onSessionReady(target: ChannelTarget, sessionId: string): void {
+    if (!target.replyTo) return;
+    this.appendHeader(target, `📋 Session: ${sessionId}`);
+    this.flushToWeCom(target, false).catch(() => {});
   }
 
   // --- Internals ---
 
-  private appendHeader(chatId: string, text: string): void {
-    const h = this.header.get(chatId) ?? [];
+  private appendHeader(target: ChannelTarget, text: string): void {
+    const key = channelTargetKey(target);
+    const h = this.header.get(key) ?? [];
     h.push(text);
-    this.header.set(chatId, h);
+    this.header.set(key, h);
   }
 
-  private buildFull(chatId: string): string {
-    const h = this.header.get(chatId) ?? [];
-    const sealed = this.sealedBlocks.get(chatId) ?? [];
-    const current = this.currentBlock.get(chatId) ?? "";
+  private buildFull(target: ChannelTarget): string {
+    const key = channelTargetKey(target);
+    const h = this.header.get(key) ?? [];
+    const sealed = this.sealedBlocks.get(key) ?? [];
+    const current = this.currentBlock.get(key) ?? "";
     const parts: string[] = [];
     if (h.length > 0) parts.push(h.join("\n"));
     if (sealed.length > 0) parts.push(sealed.join("\n\n"));
@@ -129,14 +161,15 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     return parts.join("\n\n");
   }
 
-  private async flushToWeCom(chatId: string, finish: boolean): Promise<void> {
-    const full = this.buildFull(chatId);
-    if (full) await this.wecomBot.replyMarkdown(chatId, full, finish);
+  private async flushToWeCom(target: ChannelTarget, finish: boolean): Promise<void> {
+    const full = this.buildFull(target);
+    if (full) await this.wecomBot.replyMarkdown(target, full, finish);
   }
 
-  private clearState(chatId: string): void {
-    this.header.delete(chatId);
-    this.sealedBlocks.delete(chatId);
-    this.currentBlock.delete(chatId);
+  private clearState(target: ChannelTarget): void {
+    const key = channelTargetKey(target);
+    this.header.delete(key);
+    this.sealedBlocks.delete(key);
+    this.currentBlock.delete(key);
   }
 }

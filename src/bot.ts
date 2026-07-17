@@ -11,6 +11,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
+  decryptFile,
   WSClient,
   type BaseMessage,
   type ImageContent,
@@ -19,8 +20,15 @@ import {
   type TextMessage,
   type WsFrame,
 } from "@wecom/aibot-node-sdk";
-import type { Agent, ContentBlock } from "@vibearound/plugin-channel-sdk";
-import { extractErrorMessage } from "@vibearound/plugin-channel-sdk";
+import { readBoundedResponse } from "./bounded-response.js";
+import type { Agent, ChannelInboundContext, ChannelTarget, ContentBlock } from "@vibearound/plugin-channel-sdk";
+import {
+  cancelChannelPrompt,
+  channelTargetFromInboundContext,
+  extractErrorMessage,
+  isChannelStopCommand,
+  sendChannelPrompt,
+} from "@vibearound/plugin-channel-sdk";
 import type { AgentStreamHandler } from "./agent-stream.js";
 
 interface DownloadedImage {
@@ -57,14 +65,25 @@ export class WeComBot {
   private agent: Agent;
   private log: LogFn;
   private cacheDir: string;
+  private channelInstanceId: string;
+  private actorId: string;
   private streamHandler: AgentStreamHandler | null = null;
-  /** Map chatId → latest pending frame, used for replying */
+  /** Map inbound message id → its pinned reply frame. */
   private pending = new Map<string, PendingFrame>();
 
-  constructor(config: WeComConfig, agent: Agent, log: LogFn, cacheDir: string) {
+  constructor(
+    config: WeComConfig,
+    agent: Agent,
+    log: LogFn,
+    cacheDir: string,
+    channelInstanceId: string,
+    actorId: string,
+  ) {
     this.agent = agent;
     this.log = log;
     this.cacheDir = cacheDir;
+    this.channelInstanceId = channelInstanceId;
+    this.actorId = actorId;
 
     this.client = new WSClient({
       botId: config.bot_id,
@@ -75,6 +94,10 @@ export class WeComBot {
 
   setStreamHandler(handler: AgentStreamHandler): void {
     this.streamHandler = handler;
+  }
+
+  public isConnected(): boolean {
+    return this.client.isConnected;
   }
 
   /**
@@ -89,23 +112,18 @@ export class WeComBot {
     return `dm:${msg.from?.userid ?? "unknown"}`;
   }
 
-  /** Get the pending frame for a channel (used by stream handler to reply). */
-  getPendingFrame(chatId: string): PendingFrame | null {
-    return this.pending.get(chatId) ?? null;
-  }
-
   /** Reply to a WeCom message with streaming markdown content. */
-  async replyMarkdown(chatId: string, content: string, finish: boolean): Promise<void> {
-    const pending = this.pending.get(chatId);
+  async replyMarkdown(target: ChannelTarget, content: string, finish: boolean): Promise<void> {
+    const pending = target.replyTo ? this.pending.get(target.replyTo) : undefined;
     if (!pending) {
-      this.log("warn", `no pending frame for channel=${chatId}, dropping reply`);
+      this.log("warn", `no pending frame for target=${target.chatId}/${target.replyTo ?? "route"}, dropping reply`);
       return;
     }
     try {
       await this.client.replyStream(pending.frame, pending.streamId, content, finish);
       if (finish) {
         // Clear after final reply
-        this.pending.delete(chatId);
+        this.pending.delete(target.replyTo!);
       }
     } catch (e) {
       const err = e as { message?: string };
@@ -202,82 +220,106 @@ export class WeComBot {
       return;
     }
 
+    const isGroup = msg.chattype === "group";
+    const inboundContext = {
+      channelInstanceId: this.channelInstanceId,
+      actorId: this.actorId,
+      chatId,
+      senderId,
+      platformMessageId: msg.msgid,
+      scope: isGroup ? "group" : "dm",
+      // WeCom AI Bot only emits group messages that explicitly address it.
+      addressedBy: isGroup ? "mention" : "dm",
+    } satisfies ChannelInboundContext;
+    const target = channelTargetFromInboundContext(inboundContext);
+    const inboundText = texts.join("\n");
+    if (inboundText && isChannelStopCommand(inboundText)) {
+      await cancelChannelPrompt(this.agent, { context: inboundContext });
+      return;
+    }
+
     // Generate a stream id for this turn (stable across all replyStream calls).
     // Pin the pending frame so agent-stream's replyStream calls find it.
     const streamId = `${msg.msgid}-stream`;
-    this.pending.set(chatId, { frame, streamId });
+    this.pending.set(msg.msgid, { frame, streamId });
 
-    const preview = texts.join(" ").slice(0, 80);
-    this.log(
-      "debug",
-      `message chat=${chatId} sender=${senderId} msgtype=${msg.msgtype} texts=${texts.length} images=${images.length} preview=${preview}`,
-    );
+    try {
+      const preview = texts.join(" ").slice(0, 80);
+      this.log(
+        "debug",
+        `message chat=${chatId} sender=${senderId} msgtype=${msg.msgtype} texts=${texts.length} images=${images.length} preview=${preview}`,
+      );
 
     // Download every attached image into the cache directory. Skip any
     // that fail — the agent can still handle whatever successfully
     // downloaded plus the text.
-    const downloaded: DownloadedImage[] = [];
-    for (const image of images) {
-      const local = await this.downloadImage(chatId, msg.msgid, image).catch(
-        (err: unknown) => {
-          this.log(
-            "warn",
-            `failed to download image url=${image.url}: ${extractErrorMessage(err)}`,
-          );
-          return null;
-        },
-      );
-      if (local) downloaded.push(local);
-    }
+      const downloaded: DownloadedImage[] = [];
+      for (const image of images) {
+        const local = await this.downloadImage(chatId, msg.msgid, image).catch(
+          (err: unknown) => {
+            this.log(
+              "warn",
+              `failed to download image: ${extractErrorMessage(err)}`,
+            );
+            return null;
+          },
+        );
+        if (local) downloaded.push(local);
+      }
 
     // Build content blocks. Text first (if any), then a synthesized
     // description when the message is image-only, then resource_link
     // blocks for each downloaded image. Using file:// URIs lets the
     // ACPPod relocate step hand them off to the Claude workspace the
     // same way it does for feishu/discord.
-    const contentBlocks: ContentBlock[] = [];
-    if (texts.length > 0) {
-      contentBlocks.push({ type: "text", text: texts.join("\n") });
-    } else if (downloaded.length > 0) {
-      contentBlocks.push({
-        type: "text",
-        text: `The user sent ${downloaded.length} image${downloaded.length > 1 ? "s" : ""}.`,
-      });
-    }
-    for (const image of downloaded) {
-      contentBlocks.push({
-        type: "resource_link",
-        uri: `file://${image.path}`,
-        name: image.fileName,
-        mimeType: image.mimeType,
-      });
-    }
+      const contentBlocks: ContentBlock[] = [];
+      if (texts.length > 0) {
+        contentBlocks.push({ type: "text", text: texts.join("\n") });
+      } else if (downloaded.length > 0) {
+        contentBlocks.push({
+          type: "text",
+          text: `The user sent ${downloaded.length} image${downloaded.length > 1 ? "s" : ""}.`,
+        });
+      }
+      for (const image of downloaded) {
+        contentBlocks.push({
+          type: "resource_link",
+          uri: `file://${image.path}`,
+          name: image.fileName,
+          mimeType: image.mimeType,
+        });
+      }
 
-    if (contentBlocks.length === 0) {
-      this.log("warn", `no content blocks produced for chat=${chatId}, dropping`);
-      this.pending.delete(chatId);
-      return;
-    }
+      if (contentBlocks.length === 0) {
+        this.log("warn", `no content blocks produced for chat=${chatId}, dropping`);
+        return;
+      }
 
-    const firstText = contentBlocks[0]?.type === "text" ? contentBlocks[0].text : "";
-    if (firstText && this.streamHandler?.consumePendingText(chatId, firstText)) {
-      this.pending.delete(chatId);
-      return;
-    }
+      const firstText = contentBlocks[0]?.type === "text" ? contentBlocks[0].text : "";
+      if (firstText && this.streamHandler?.consumePendingText(target, firstText)) {
+        return;
+      }
 
-    this.streamHandler?.onPromptSent(chatId);
+      this.streamHandler?.onPromptSent(target);
 
-    try {
-      const response = await this.agent.prompt({
-        sessionId: chatId,
-        prompt: contentBlocks,
-      });
-      this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
-      this.streamHandler?.onTurnEnd(chatId);
-    } catch (error: unknown) {
-      const errMsg = extractErrorMessage(error);
-      this.log("error", `prompt failed chat=${chatId}: ${errMsg}`);
-      this.streamHandler?.onTurnError(chatId, errMsg);
+      try {
+        const response = await sendChannelPrompt(this.agent, {
+          context: inboundContext,
+          prompt: contentBlocks,
+        });
+        if (!response) {
+          await this.streamHandler?.onTurnEnd(target);
+          return;
+        }
+        this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
+        await this.streamHandler?.onTurnEnd(target);
+      } catch (error: unknown) {
+        const errMsg = extractErrorMessage(error);
+        this.log("error", `prompt failed chat=${chatId}: ${errMsg}`);
+        await this.streamHandler?.onTurnError(target, errMsg);
+      }
+    } finally {
+      if (target.replyTo) this.pending.delete(target.replyTo);
     }
   }
 
@@ -308,15 +350,12 @@ export class WeComBot {
     const dir = path.join(this.cacheDir, "wecom", safeChannel);
     const baseName = `${msgid}-${urlHint || "image"}`;
 
-    this.log(
-      "debug",
-      `downloading image msgid=${msgid} chat=${chatId} url=${image.url}`,
-    );
-
-    const { buffer, filename } = await this.client.downloadFile(
-      image.url,
-      image.aeskey,
-    );
+    this.log("debug", `downloading image msgid=${msgid} chat=${chatId}`);
+    const response = await fetch(image.url);
+    if (!response.ok) throw new Error(`HTTP ${response.status} fetching image`);
+    const encrypted = await readBoundedResponse(response);
+    const buffer = image.aeskey ? decryptFile(encrypted, image.aeskey) : encrypted;
+    const filename = filenameFromDisposition(response.headers.get("content-disposition"));
 
     // SDK sometimes returns a filename with extension; prefer it.
     const effectiveName = filename ?? `${baseName}.jpg`;
@@ -336,5 +375,18 @@ export class WeComBot {
       mimeType: mimeFromFilename(effectiveName),
       fileName: effectiveName,
     };
+  }
+}
+
+function filenameFromDisposition(value: string | null): string | undefined {
+  if (!value) return undefined;
+  const utf8 = value.match(/filename\*=UTF-8''([^;\s]+)/i)?.[1];
+  const plain = value.match(/filename="?([^";\s]+)"?/i)?.[1];
+  const encoded = utf8 ?? plain;
+  if (!encoded) return undefined;
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return encoded;
   }
 }
