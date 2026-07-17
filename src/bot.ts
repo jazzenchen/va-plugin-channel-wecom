@@ -11,6 +11,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
+  decryptFile,
   WSClient,
   type BaseMessage,
   type ImageContent,
@@ -19,6 +20,7 @@ import {
   type TextMessage,
   type WsFrame,
 } from "@wecom/aibot-node-sdk";
+import { readBoundedResponse } from "./bounded-response.js";
 import type { Agent, ChannelInboundContext, ChannelTarget, ContentBlock } from "@vibearound/plugin-channel-sdk";
 import {
   cancelChannelPrompt,
@@ -257,7 +259,7 @@ export class WeComBot {
           (err: unknown) => {
             this.log(
               "warn",
-              `failed to download image url=${image.url}: ${extractErrorMessage(err)}`,
+              `failed to download image: ${extractErrorMessage(err)}`,
             );
             return null;
           },
@@ -348,15 +350,12 @@ export class WeComBot {
     const dir = path.join(this.cacheDir, "wecom", safeChannel);
     const baseName = `${msgid}-${urlHint || "image"}`;
 
-    this.log(
-      "debug",
-      `downloading image msgid=${msgid} chat=${chatId} url=${image.url}`,
-    );
-
-    const { buffer, filename } = await this.client.downloadFile(
-      image.url,
-      image.aeskey,
-    );
+    this.log("debug", `downloading image msgid=${msgid} chat=${chatId}`);
+    const response = await fetch(image.url);
+    if (!response.ok) throw new Error(`HTTP ${response.status} fetching image`);
+    const encrypted = await readBoundedResponse(response);
+    const buffer = image.aeskey ? decryptFile(encrypted, image.aeskey) : encrypted;
+    const filename = filenameFromDisposition(response.headers.get("content-disposition"));
 
     // SDK sometimes returns a filename with extension; prefer it.
     const effectiveName = filename ?? `${baseName}.jpg`;
@@ -376,5 +375,18 @@ export class WeComBot {
       mimeType: mimeFromFilename(effectiveName),
       fileName: effectiveName,
     };
+  }
+}
+
+function filenameFromDisposition(value: string | null): string | undefined {
+  if (!value) return undefined;
+  const utf8 = value.match(/filename\*=UTF-8''([^;\s]+)/i)?.[1];
+  const plain = value.match(/filename="?([^";\s]+)"?/i)?.[1];
+  const encoded = utf8 ?? plain;
+  if (!encoded) return undefined;
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return encoded;
   }
 }
