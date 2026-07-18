@@ -13,7 +13,7 @@ import { AgentStreamHandler } from "./agent-stream.js";
 
 runChannelPlugin({
   name: "vibearound-wecom",
-  version: "0.6.3",
+  version: "0.6.6",
   requiredConfig: ["bot_id", "secret"],
   createBot: ({ config, agent, log, cacheDir, channelInstanceId, actorId }) =>
     new WeComBot(
