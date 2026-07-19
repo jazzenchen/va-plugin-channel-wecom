@@ -69,10 +69,11 @@ test("replyMarkdown rejects when its inbound reply context is missing", async ()
 });
 
 test("replyMarkdown propagates replyStream API failures", async () => {
+  const logs = [];
   const bot = new WeComBot(
     { bot_id: "bot-a", secret: "secret-a" },
     {},
-    () => {},
+    (level, message) => logs.push({ level, message }),
     "/tmp",
     "wecom-work",
     "bot-a",
@@ -85,6 +86,7 @@ test("replyMarkdown propagates replyStream API failures", async () => {
     bot.replyMarkdown(target, "reply", false),
     failure,
   );
+  assert.deepEqual(logs, [{ level: "error", message: "replyStream failed" }]);
 });
 
 test("notification delivery failure is reported by onTurnEnd", async () => {

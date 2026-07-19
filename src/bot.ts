@@ -139,8 +139,7 @@ export class WeComBot {
         this.pending.delete(target.replyTo!);
       }
     } catch (e) {
-      const err = e as { message?: string };
-      this.log("error", `replyStream failed: ${err.message ?? String(e)}`);
+      this.log("error", "replyStream failed");
       throw e;
     }
   }
@@ -167,8 +166,8 @@ export class WeComBot {
     // ones we care about. Voice/file/video are routed through the same
     // handler as text: the generic path grabs whatever fields are present.
     const handleInbound = (frame: WsFrame<BaseMessage>): void => {
-      void this.handleMessage(frame).catch((error: unknown) => {
-        this.log("error", `message handling failed: ${extractErrorMessage(error)}`);
+      void this.handleMessage(frame).catch(() => {
+        this.log("error", "message handling failed");
       });
     };
     this.client.on("message.text", (frame: WsFrame<TextMessage>) => handleInbound(frame));
