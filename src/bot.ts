@@ -89,6 +89,15 @@ export class WeComBot {
       botId: config.bot_id,
       secret: config.secret,
       maxReconnectAttempts: -1, // infinite reconnect
+      // The SDK's default debug logger serializes complete inbound and
+      // outbound frames. Lifecycle and errors are surfaced by our event
+      // handlers below, so keep the duplicate SDK logger silent.
+      logger: {
+        debug: () => {},
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+      },
     });
   }
 
@@ -247,10 +256,9 @@ export class WeComBot {
     this.pending.set(msg.msgid, { frame, streamId });
 
     try {
-      const preview = texts.join(" ").slice(0, 80);
       this.log(
         "debug",
-        `message chat=${chatId} sender=${senderId} msgtype=${msg.msgtype} texts=${texts.length} images=${images.length} preview=${preview}`,
+        `message chat=${chatId} sender=${senderId} msgtype=${msg.msgtype} texts=${texts.length} images=${images.length}`,
       );
 
     // Download every attached image into the cache directory. Skip any
