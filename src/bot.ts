@@ -266,8 +266,13 @@ export class WeComBot {
     // that fail — the agent can still handle whatever successfully
     // downloaded plus the text.
       const downloaded: DownloadedImage[] = [];
-      for (const image of images) {
-        const local = await this.downloadImage(chatId, msg.msgid, image).catch(
+      for (const [imageIndex, image] of images.entries()) {
+        const local = await this.downloadImage(
+          chatId,
+          msg.msgid,
+          imageIndex,
+          image,
+        ).catch(
           (err: unknown) => {
             this.log(
               "warn",
@@ -335,32 +340,16 @@ export class WeComBot {
     }
   }
 
-  /**
-   * Download and decrypt a WeCom image via the SDK. Images are cached by
-   * msgid so retries of the same message don't re-download. Returns the
-   * cached file path plus metadata needed to build a resource_link block.
-   */
+  /** Download and decrypt a WeCom image into the plugin cache directory. */
   private async downloadImage(
     chatId: string,
     msgid: string,
+    imageIndex: number,
     image: ImageContent,
   ): Promise<DownloadedImage> {
-    // WeCom download URLs expire in 5 minutes and contain a signed query
-    // string, so we can't safely derive a stable cache key from the URL.
-    // msgid is stable for the lifetime of a conversation, and images are
-    // one-per-message in the pure-image case; for mixed messages we fall
-    // back to hashing the URL path to disambiguate.
-    const urlPath = (() => {
-      try {
-        return new URL(image.url).pathname;
-      } catch {
-        return image.url;
-      }
-    })();
-    const urlHint = path.basename(urlPath).replace(/[^a-zA-Z0-9._-]/g, "_");
     const safeChannel = chatId.replace(/[^a-zA-Z0-9._-]/g, "_");
     const dir = path.join(this.cacheDir, "wecom", safeChannel);
-    const baseName = `${msgid}-${urlHint || "image"}`;
+    const baseName = `${msgid}-${imageIndex}`;
 
     this.log("debug", `downloading image msgid=${msgid} chat=${chatId}`);
     const response = await fetch(image.url);
@@ -379,7 +368,7 @@ export class WeComBot {
 
     this.log(
       "debug",
-      `cached image ${buffer.length} bytes → ${localPath}`,
+      `saved image ${buffer.length} bytes → ${localPath}`,
     );
 
     return {
