@@ -89,14 +89,14 @@ export class WeComBot {
       botId: config.bot_id,
       secret: config.secret,
       maxReconnectAttempts: -1, // infinite reconnect
-      // The SDK's default debug logger serializes complete inbound and
-      // outbound frames. Lifecycle and errors are surfaced by our event
-      // handlers below, so keep the duplicate SDK logger silent.
+      // The SDK's debug logger serializes complete inbound and outbound
+      // frames. Keep those payloads silent, but retain payload-free warning
+      // and error signals for failures not surfaced by our event handlers.
       logger: {
         debug: () => {},
         info: () => {},
-        warn: () => {},
-        error: () => {},
+        warn: () => log("warn", "WeCom SDK warning"),
+        error: () => log("error", "WeCom SDK error"),
       },
     });
   }
