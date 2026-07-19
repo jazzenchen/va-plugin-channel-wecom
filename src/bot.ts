@@ -10,6 +10,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   decryptFile,
   WSClient,
@@ -295,7 +296,7 @@ export class WeComBot {
       for (const image of downloaded) {
         contentBlocks.push({
           type: "resource_link",
-          uri: `file://${image.path}`,
+          uri: pathToFileURL(image.path).href,
           name: image.fileName,
           mimeType: image.mimeType,
         });
