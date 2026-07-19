@@ -116,8 +116,11 @@ export class WeComBot {
   async replyMarkdown(target: ChannelTarget, content: string, finish: boolean): Promise<void> {
     const pending = target.replyTo ? this.pending.get(target.replyTo) : undefined;
     if (!pending) {
-      this.log("warn", `no pending frame for target=${target.chatId}/${target.replyTo ?? "route"}, dropping reply`);
-      return;
+      this.log(
+        "warn",
+        `no pending frame for target=${target.chatId}/${target.replyTo ?? "route"}`,
+      );
+      throw new Error("WeCom reply context is unavailable");
     }
     try {
       await this.client.replyStream(pending.frame, pending.streamId, content, finish);
@@ -128,6 +131,7 @@ export class WeComBot {
     } catch (e) {
       const err = e as { message?: string };
       this.log("error", `replyStream failed: ${err.message ?? String(e)}`);
+      throw e;
     }
   }
 
@@ -152,15 +156,14 @@ export class WeComBot {
     // msgtype — text, image, and mixed (text + image) are the interactive
     // ones we care about. Voice/file/video are routed through the same
     // handler as text: the generic path grabs whatever fields are present.
-    this.client.on("message.text", (frame: WsFrame<TextMessage>) => {
-      void this.handleMessage(frame);
-    });
-    this.client.on("message.image", (frame: WsFrame<ImageMessage>) => {
-      void this.handleMessage(frame);
-    });
-    this.client.on("message.mixed", (frame: WsFrame<MixedMessage>) => {
-      void this.handleMessage(frame);
-    });
+    const handleInbound = (frame: WsFrame<BaseMessage>): void => {
+      void this.handleMessage(frame).catch((error: unknown) => {
+        this.log("error", `message handling failed: ${extractErrorMessage(error)}`);
+      });
+    };
+    this.client.on("message.text", (frame: WsFrame<TextMessage>) => handleInbound(frame));
+    this.client.on("message.image", (frame: WsFrame<ImageMessage>) => handleInbound(frame));
+    this.client.on("message.mixed", (frame: WsFrame<MixedMessage>) => handleInbound(frame));
 
     // Connect (synchronous chainable, returns this)
     this.client.connect();

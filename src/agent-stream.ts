@@ -102,7 +102,7 @@ export class AgentStreamHandler extends BlockRenderer<string> {
   // Override notification handlers — accumulate in header instead of sendText
   onSystemText(target: ChannelTarget, text: string): void {
     this.appendHeader(target, text);
-    this.flushToWeCom(target, false).catch(() => {});
+    super.onSystemText(target, this.buildFull(target));
   }
 
   onSessionInfo(target: ChannelTarget, info: ChannelSessionInfo): void {
@@ -123,21 +123,21 @@ export class AgentStreamHandler extends BlockRenderer<string> {
         sessionLine,
       ].join("\n"),
     );
-    this.flushToWeCom(target, false).catch(() => {});
+    super.onSystemText(target, this.buildFull(target));
   }
 
   /** @deprecated `va/session_info` carries the visible startup card. */
   onAgentReady(target: ChannelTarget, agent: string, version: string): void {
     if (!target.replyTo) return;
     this.appendHeader(target, `🤖 Agent: ${agent} v${version}`);
-    this.flushToWeCom(target, false).catch(() => {});
+    super.onSystemText(target, this.buildFull(target));
   }
 
   /** @deprecated `va/session_info` carries the visible startup card. */
   onSessionReady(target: ChannelTarget, sessionId: string): void {
     if (!target.replyTo) return;
     this.appendHeader(target, `📋 Session: ${sessionId}`);
-    this.flushToWeCom(target, false).catch(() => {});
+    super.onSystemText(target, this.buildFull(target));
   }
 
   // --- Internals ---
