@@ -10,6 +10,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   decryptFile,
   WSClient,
@@ -89,6 +90,14 @@ export class WeComBot {
       botId: config.bot_id,
       secret: config.secret,
       maxReconnectAttempts: -1, // infinite reconnect
+      // The SDK logger can serialize complete inbound and outbound frames.
+      // Lifecycle failures are reported by the explicit handlers below.
+      logger: {
+        debug: () => {},
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+      },
     });
   }
 
@@ -116,18 +125,12 @@ export class WeComBot {
   async replyMarkdown(target: ChannelTarget, content: string, finish: boolean): Promise<void> {
     const pending = target.replyTo ? this.pending.get(target.replyTo) : undefined;
     if (!pending) {
-      this.log("warn", `no pending frame for target=${target.chatId}/${target.replyTo ?? "route"}, dropping reply`);
-      return;
+      throw new Error("WeCom reply context is unavailable");
     }
-    try {
-      await this.client.replyStream(pending.frame, pending.streamId, content, finish);
-      if (finish) {
-        // Clear after final reply
-        this.pending.delete(target.replyTo!);
-      }
-    } catch (e) {
-      const err = e as { message?: string };
-      this.log("error", `replyStream failed: ${err.message ?? String(e)}`);
+    await this.client.replyStream(pending.frame, pending.streamId, content, finish);
+    if (finish) {
+      // Clear after final reply
+      this.pending.delete(target.replyTo!);
     }
   }
 
@@ -152,15 +155,14 @@ export class WeComBot {
     // msgtype — text, image, and mixed (text + image) are the interactive
     // ones we care about. Voice/file/video are routed through the same
     // handler as text: the generic path grabs whatever fields are present.
-    this.client.on("message.text", (frame: WsFrame<TextMessage>) => {
-      void this.handleMessage(frame);
-    });
-    this.client.on("message.image", (frame: WsFrame<ImageMessage>) => {
-      void this.handleMessage(frame);
-    });
-    this.client.on("message.mixed", (frame: WsFrame<MixedMessage>) => {
-      void this.handleMessage(frame);
-    });
+    const handleInbound = (frame: WsFrame<BaseMessage>): void => {
+      void this.handleMessage(frame).catch(() => {
+        this.log("error", "message handling failed");
+      });
+    };
+    this.client.on("message.text", (frame: WsFrame<TextMessage>) => handleInbound(frame));
+    this.client.on("message.image", (frame: WsFrame<ImageMessage>) => handleInbound(frame));
+    this.client.on("message.mixed", (frame: WsFrame<MixedMessage>) => handleInbound(frame));
 
     // Connect (synchronous chainable, returns this)
     this.client.connect();
@@ -244,18 +246,22 @@ export class WeComBot {
     this.pending.set(msg.msgid, { frame, streamId });
 
     try {
-      const preview = texts.join(" ").slice(0, 80);
       this.log(
         "debug",
-        `message chat=${chatId} sender=${senderId} msgtype=${msg.msgtype} texts=${texts.length} images=${images.length} preview=${preview}`,
+        `message chat=${chatId} sender=${senderId} msgtype=${msg.msgtype} texts=${texts.length} images=${images.length}`,
       );
 
     // Download every attached image into the cache directory. Skip any
     // that fail — the agent can still handle whatever successfully
     // downloaded plus the text.
       const downloaded: DownloadedImage[] = [];
-      for (const image of images) {
-        const local = await this.downloadImage(chatId, msg.msgid, image).catch(
+      for (const [imageIndex, image] of images.entries()) {
+        const local = await this.downloadImage(
+          chatId,
+          msg.msgid,
+          imageIndex,
+          image,
+        ).catch(
           (err: unknown) => {
             this.log(
               "warn",
@@ -284,7 +290,7 @@ export class WeComBot {
       for (const image of downloaded) {
         contentBlocks.push({
           type: "resource_link",
-          uri: `file://${image.path}`,
+          uri: pathToFileURL(image.path).href,
           name: image.fileName,
           mimeType: image.mimeType,
         });
@@ -323,32 +329,16 @@ export class WeComBot {
     }
   }
 
-  /**
-   * Download and decrypt a WeCom image via the SDK. Images are cached by
-   * msgid so retries of the same message don't re-download. Returns the
-   * cached file path plus metadata needed to build a resource_link block.
-   */
+  /** Download and decrypt a WeCom image into the plugin cache directory. */
   private async downloadImage(
     chatId: string,
     msgid: string,
+    imageIndex: number,
     image: ImageContent,
   ): Promise<DownloadedImage> {
-    // WeCom download URLs expire in 5 minutes and contain a signed query
-    // string, so we can't safely derive a stable cache key from the URL.
-    // msgid is stable for the lifetime of a conversation, and images are
-    // one-per-message in the pure-image case; for mixed messages we fall
-    // back to hashing the URL path to disambiguate.
-    const urlPath = (() => {
-      try {
-        return new URL(image.url).pathname;
-      } catch {
-        return image.url;
-      }
-    })();
-    const urlHint = path.basename(urlPath).replace(/[^a-zA-Z0-9._-]/g, "_");
     const safeChannel = chatId.replace(/[^a-zA-Z0-9._-]/g, "_");
     const dir = path.join(this.cacheDir, "wecom", safeChannel);
-    const baseName = `${msgid}-${urlHint || "image"}`;
+    const baseName = `${msgid}-${imageIndex}`;
 
     this.log("debug", `downloading image msgid=${msgid} chat=${chatId}`);
     const response = await fetch(image.url);
@@ -367,7 +357,7 @@ export class WeComBot {
 
     this.log(
       "debug",
-      `cached image ${buffer.length} bytes → ${localPath}`,
+      `saved image ${buffer.length} bytes → ${localPath}`,
     );
 
     return {
