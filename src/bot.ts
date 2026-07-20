@@ -90,14 +90,13 @@ export class WeComBot {
       botId: config.bot_id,
       secret: config.secret,
       maxReconnectAttempts: -1, // infinite reconnect
-      // The SDK's debug logger serializes complete inbound and outbound
-      // frames. Keep those payloads silent, but retain payload-free warning
-      // and error signals for failures not surfaced by our event handlers.
+      // The SDK logger can serialize complete inbound and outbound frames.
+      // Lifecycle failures are reported by the explicit handlers below.
       logger: {
         debug: () => {},
         info: () => {},
-        warn: () => log("warn", "WeCom SDK warning"),
-        error: () => log("error", "WeCom SDK error"),
+        warn: () => {},
+        error: () => {},
       },
     });
   }
@@ -126,21 +125,12 @@ export class WeComBot {
   async replyMarkdown(target: ChannelTarget, content: string, finish: boolean): Promise<void> {
     const pending = target.replyTo ? this.pending.get(target.replyTo) : undefined;
     if (!pending) {
-      this.log(
-        "warn",
-        `no pending frame for target=${target.chatId}/${target.replyTo ?? "route"}`,
-      );
       throw new Error("WeCom reply context is unavailable");
     }
-    try {
-      await this.client.replyStream(pending.frame, pending.streamId, content, finish);
-      if (finish) {
-        // Clear after final reply
-        this.pending.delete(target.replyTo!);
-      }
-    } catch (e) {
-      this.log("error", "replyStream failed");
-      throw e;
+    await this.client.replyStream(pending.frame, pending.streamId, content, finish);
+    if (finish) {
+      // Clear after final reply
+      this.pending.delete(target.replyTo!);
     }
   }
 

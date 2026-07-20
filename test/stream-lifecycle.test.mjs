@@ -53,10 +53,11 @@ test("mode updates do not finish the WeCom reply stream before turn end", async 
 });
 
 test("replyMarkdown rejects when its inbound reply context is missing", async () => {
+  const logs = [];
   const bot = new WeComBot(
     { bot_id: "bot-a", secret: "secret-a" },
     {},
-    () => {},
+    (level, message) => logs.push({ level, message }),
     "/tmp",
     "wecom-work",
     "bot-a",
@@ -66,6 +67,7 @@ test("replyMarkdown rejects when its inbound reply context is missing", async ()
     bot.replyMarkdown(target, "reply", false),
     /WeCom reply context is unavailable/,
   );
+  assert.deepEqual(logs, []);
 });
 
 test("replyMarkdown propagates replyStream API failures", async () => {
@@ -86,7 +88,26 @@ test("replyMarkdown propagates replyStream API failures", async () => {
     bot.replyMarkdown(target, "reply", false),
     failure,
   );
-  assert.deepEqual(logs, [{ level: "error", message: "replyStream failed" }]);
+  assert.deepEqual(logs, []);
+});
+
+test("SDK logger stays silent while lifecycle handlers own failures", () => {
+  const logs = [];
+  const bot = new WeComBot(
+    { bot_id: "bot-a", secret: "secret-a" },
+    {},
+    (level, message) => logs.push({ level, message }),
+    "/tmp",
+    "wecom-work",
+    "bot-a",
+  );
+
+  bot.client.logger.debug("inbound frame");
+  bot.client.logger.info("outbound frame");
+  bot.client.logger.warn("connection warning");
+  bot.client.logger.error("connection error");
+
+  assert.deepEqual(logs, []);
 });
 
 test("notification delivery failure is reported by onTurnEnd", async () => {
