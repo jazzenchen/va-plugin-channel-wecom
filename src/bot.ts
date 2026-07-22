@@ -22,7 +22,7 @@ import {
   type WsFrame,
 } from "@wecom/aibot-node-sdk";
 import { readBoundedResponse } from "./bounded-response.js";
-import type { Agent, ChannelInboundContext, ChannelTarget, ContentBlock } from "@vibearound/plugin-channel-sdk";
+import type { Agent, ChannelInboundContext, ChannelTarget, ContentBlock, OutboundFile } from "@vibearound/plugin-channel-sdk";
 import {
   cancelChannelPrompt,
   channelTargetFromInboundContext,
@@ -132,6 +132,19 @@ export class WeComBot {
       // Clear after final reply
       this.pending.delete(target.replyTo!);
     }
+  }
+
+  async replyFile(target: ChannelTarget, file: OutboundFile): Promise<void> {
+    const pending = target.replyTo ? this.pending.get(target.replyTo) : undefined;
+    if (!pending) {
+      throw new Error("WeCom reply context is unavailable");
+    }
+    const contents = await fs.readFile(file.path);
+    const uploaded = await this.client.uploadMedia(contents, {
+      type: "file",
+      filename: file.name,
+    });
+    await this.client.replyMedia(pending.frame, "file", uploaded.media_id);
   }
 
   async start(): Promise<void> {

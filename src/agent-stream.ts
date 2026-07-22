@@ -14,6 +14,7 @@ import {
   type BlockKind,
   type ChannelSessionInfo,
   type ChannelTarget,
+  type OutboundFile,
   type VerboseConfig,
   channelTargetKey,
 } from "@vibearound/plugin-channel-sdk";
@@ -47,6 +48,13 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     // Text notifications and permission prompts can arrive mid-turn. Only
     // onAfterTurnEnd/onAfterTurnError may finish the pinned reply stream.
     await this.wecomBot.replyMarkdown(target, text, false);
+  }
+
+  protected async sendFile(
+    target: ChannelTarget,
+    file: OutboundFile,
+  ): Promise<void> {
+    await this.wecomBot.replyFile(target, file);
   }
 
   protected formatContent(kind: BlockKind, content: string, _sealed: boolean): string {
@@ -106,6 +114,7 @@ export class AgentStreamHandler extends BlockRenderer<string> {
   }
 
   onSessionInfo(target: ChannelTarget, info: ChannelSessionInfo): void {
+    this.rememberSessionInfo(target, info);
     if (!target.replyTo) return;
     const agentVersion = info.agent.version ? ` v${info.agent.version}` : "";
     const profile = info.agent.profileId ?? "default";
