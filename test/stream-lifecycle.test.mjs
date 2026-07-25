@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { AgentStreamHandler } from "../dist/agent-stream.js";
 import { WeComBot } from "../dist/bot.js";
@@ -89,6 +93,76 @@ test("replyMarkdown propagates replyStream API failures", async () => {
     failure,
   );
   assert.deepEqual(logs, []);
+});
+
+test("custom session rendering still enables workspace file delivery", async (t) => {
+  const workspace = await mkdtemp(path.join(tmpdir(), "wecom-outbound-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const filePath = path.join(workspace, "report.pdf");
+  await writeFile(filePath, "report");
+  const files = [];
+  const bot = {
+    async replyMarkdown() {},
+    async replyFile(_target, file) {
+      files.push(file);
+    },
+  };
+  const renderer = new AgentStreamHandler(bot, () => {});
+
+  renderer.onPromptSent(target);
+  renderer.onSessionInfo(target, {
+    workspacePath: workspace,
+    sessionId: "session-a",
+    start: "new",
+    agent: { name: "Agent" },
+  });
+  renderer.onSessionUpdate(target, {
+    sessionId: "session-a",
+    update: {
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "resource_link",
+        uri: pathToFileURL(filePath).href,
+        name: "report.pdf",
+      },
+    },
+  });
+  await renderer.onTurnEnd(target);
+
+  assert.equal(files.length, 1);
+  assert.equal(files[0].path, await realpath(filePath));
+  assert.equal(files[0].name, "report.pdf");
+});
+
+test("WeCom uploads a file against the pinned reply frame", async (t) => {
+  const workspace = await mkdtemp(path.join(tmpdir(), "wecom-upload-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const filePath = path.join(workspace, "report.pdf");
+  await writeFile(filePath, "report");
+  const bot = new WeComBot(
+    { bot_id: "bot-a", secret: "secret-a" },
+    {},
+    () => {},
+    "/tmp",
+    "wecom-work",
+    "bot-a",
+  );
+  const frame = {};
+  bot.pending.set(target.replyTo, { frame, streamId: "stream-a" });
+  bot.client.uploadMedia = async (contents, options) => {
+    assert.equal(contents.toString(), "report");
+    assert.deepEqual(options, { type: "file", filename: "report.pdf" });
+    return { media_id: "media-a" };
+  };
+  const replies = [];
+  bot.client.replyMedia = async (...args) => replies.push(args);
+
+  await bot.replyFile(target, {
+    path: filePath,
+    name: "report.pdf",
+  });
+
+  assert.deepEqual(replies, [[frame, "file", "media-a"]]);
 });
 
 test("SDK logger stays silent while lifecycle handlers own failures", () => {
